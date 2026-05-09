@@ -1,98 +1,226 @@
 ## VTLA LeRobot Tactile Fork
 
-This repository is a VTLA-focused fork of Hugging Face LeRobot. It keeps the original LeRobot
-data collection, training, policy, and robot abstractions, while adding tactile-sensor support
-for SO-101/Paxini-style experiments.
+이 저장소는 Hugging Face의 원래 `LeRobot`을 기반으로, VTLA/VLA 실험에서 촉각 센서를 같이 쓰기 위해 수정한 fork입니다.
+원래 LeRobot의 로봇 제어, 카메라 기록, 데이터셋 저장, 학습 스크립트 구조는 최대한 유지했고, 여기에 Paxini tactile sensor를 SO-101 follower와 함께 읽을 수 있는 경로를 추가했습니다.
 
-### What Changed From Original LeRobot
+쉽게 말하면 원래 LeRobot이 아래 데이터를 주로 다뤘다면,
 
-Original LeRobot sensor flow:
+- 로봇 관절 상태: `observation.state`
+- 카메라 이미지: `observation.images.*`
+- 행동 라벨: `action`
+- 언어/task 입력: policy에 따라 language token
 
-1. A robot class implements `get_observation()`.
-2. Standard SO-101 followers return motor state as `observation.state`.
-3. Cameras return image/video features as `observation.images.*`.
-4. Training policies consume `observation.state`, `observation.images.*`, language tokens, and `action`.
+이 fork는 거기에 아래 촉각 데이터를 하나 더 붙입니다.
 
-VTLA tactile flow added in this fork:
+- 촉각 맵: `observation.tactile.primary`
 
-1. `PaxiniSO101Follower` extends the original SO follower, so the normal motor/camera path still runs.
-2. After `super().get_observation()`, it reads the Paxini tactile sensor through `SerialPaxiniReader`.
-3. The serial reader follows the vendor UART frame example:
-   request header `55 AA`, response header `AA 55`, little-endian length/address fields,
-   status byte at offset 13, and two's-complement LRC validation.
-4. Raw taxel values are converted by `TactileHeatmapRenderer` into a normalized float32 2D tactile map.
-5. The final observation includes `observation.tactile.primary`, not a fake RGB tactile image.
-6. Dataset metadata marks this feature as `FeatureType.TACTILE`, so it is not merged into robot state.
+촉각 값을 RGB 이미지처럼 억지로 바꾸지 않고, `float32` 2D tactile map으로 저장합니다. 그래서 나중에 Pi0/Pi0.5 같은 VLA policy가 이미지, 로봇 상태, 언어 입력과 함께 tactile token을 따로 사용할 수 있습니다.
 
-### Exact Source Changes
+### 전체 데이터 흐름
 
-- `src/lerobot_robot_paxini/`
-  - `config_paxini_so101.py`: Paxini/SO-101 robot config, UART options, taxel map options.
-  - `paxini_so101.py`: extends SO follower and appends `observation.tactile.primary`.
-  - `paxini_reader.py`: mock reader plus real Paxini UART read/write protocol.
-  - `tactile_render.py`: taxel coordinate map to normalized 2D tactile grid.
-  - `types.py`: `PaxiniSample` container for taxels and force/torque values.
+현재 구현된 흐름은 다음 순서입니다.
+
+1. LeRobot의 기존 `SOFollower`가 모터 상태와 카메라 이미지를 읽습니다.
+2. 새로 추가한 `PaxiniSO101Follower`가 `SOFollower`를 상속해서 기존 observation을 그대로 받습니다.
+3. 그 다음 Paxini tactile 센서를 `SerialPaxiniReader`로 읽습니다.
+4. UART response에서 taxel raw 값을 꺼냅니다.
+5. `TactileHeatmapRenderer`가 taxel 위치 정보를 이용해서 2D tactile heatmap으로 바꿉니다.
+6. 최종 observation에 `observation.tactile.primary`가 추가됩니다.
+7. LeRobotDataset 저장 시 이 값은 `FeatureType.TACTILE`로 분류됩니다.
+8. Pi0/Pi0.5 학습 시 tactile feature를 prefix token으로 encode해서 vision/language token과 함께 넣습니다.
+
+정리하면, 이 fork의 목표는 `카메라 + 로봇 상태 + action`만 쓰던 LeRobot 데이터 구조에 `촉각 맵`을 정식 feature로 추가하는 것입니다.
+
+### 원래 LeRobot과 가장 큰 차이
+
+| 구분 | 원래 LeRobot | 이 VTLA fork |
+| --- | --- | --- |
+| 로봇 타입 | `so100_follower`, `so101_follower` 등 기본 follower | `paxini_so101_follower` 추가 |
+| tactile 센서 | 기본 지원 없음 | Paxini UART 센서 reader 추가 |
+| tactile 데이터 저장 | 없음 | `observation.tactile.primary` |
+| tactile feature 타입 | 없음 | `FeatureType.TACTILE` |
+| tactile 값 형태 | 없음 | normalized `float32` 2D map |
+| VLA 학습 | image/state/language/action 중심 | Pi0/Pi0.5에서 tactile prefix token 추가 |
+| 다른 센서 적용 | 직접 robot/policy 수정 필요 | sensor reader와 renderer만 바꾸면 재사용 가능하게 구성 |
+
+### 실제로 추가/수정된 코드
+
+#### 1. Paxini 로봇 통합 코드
+
+`src/lerobot_robot_paxini/` 아래에 Paxini tactile sensor를 SO-101 follower에 붙이는 코드가 들어 있습니다.
+
+- `config_paxini_so101.py`
+  - `paxini_so101_follower` robot type을 등록합니다.
+  - tactile serial port, baudrate, device id, read address, taxel dtype, tactile map size 같은 설정을 둡니다.
+  - 기본값은 테스트가 쉽도록 `tactile_mock=True`입니다. 실제 센서를 읽으려면 `--robot.tactile_mock=false`로 바꿔야 합니다.
+
+- `paxini_so101.py`
+  - 기존 `SOFollower`를 상속합니다.
+  - 기존 motor/camera observation에 `observation.tactile.primary`를 추가합니다.
+  - force/torque 값도 `paxini.fx`, `paxini.fy`, `paxini.fz`, `paxini.tx`, `paxini.ty`, `paxini.tz`로 같이 넣습니다.
+
+- `paxini_reader.py`
+  - Paxini UART protocol을 Python에서 읽을 수 있게 구현한 파일입니다.
+  - vendor 예제 코드의 구조를 반영해서 request header는 `55 AA`, response header는 `AA 55`로 처리합니다.
+  - little-endian length/address field, device id, function code, status byte, LRC checksum을 검증합니다.
+  - `MockPaxiniReader`도 있어서 실제 센서 없이 recording/training pipeline 테스트가 가능합니다.
+
+- `tactile_render.py`
+  - taxel raw vector를 2D tactile map으로 변환합니다.
+  - `tactile_map_path`가 있으면 xlsx에서 taxel 좌표를 읽습니다.
+  - 없으면 mock taxel map을 만들어서 테스트합니다.
+  - 기본 출력 크기는 `64 x 64`입니다.
+
+- `types.py`
+  - taxel 배열과 force/torque 값을 담는 `PaxiniSample` dataclass가 있습니다.
+
+#### 2. LeRobot feature/type 수정
+
+LeRobot이 tactile 값을 그냥 state vector로 착각하지 않도록 feature type을 추가했습니다.
+
 - `src/lerobot/configs/types.py`
-  - Adds `FeatureType.TACTILE`.
+  - `FeatureType.TACTILE` 추가
+
 - `src/lerobot/utils/constants.py`
-  - Adds `OBS_TACTILE = "observation.tactile"`.
+  - `OBS_TACTILE = "observation.tactile"` 추가
+
 - `src/lerobot/utils/feature_utils.py`
-  - Converts tactile hardware features into float32 dataset features.
-  - Classifies `observation.tactile.*` as `FeatureType.TACTILE` instead of `FeatureType.STATE`.
+  - hardware feature에서 tactile feature를 dataset feature로 변환합니다.
+  - `observation.tactile.*`를 `FeatureType.STATE`가 아니라 `FeatureType.TACTILE`로 분류합니다.
+
+- `src/lerobot/datasets/feature_utils.py`
+  - dataset metadata를 policy input feature로 바꿀 때 tactile feature를 유지하도록 연결됩니다.
+
+#### 3. Policy 쪽 tactile 입력 추가
+
 - `src/lerobot/configs/policies.py`
-  - Adds `tactile_features` helper for policy configs.
+  - policy config에서 tactile input feature만 쉽게 가져올 수 있는 helper를 추가했습니다.
+
 - `src/lerobot/policies/tactile/`
-  - Adds reusable CNN/attention tactile token encoders.
+  - tactile map을 token embedding으로 바꾸는 공통 encoder가 있습니다.
+  - `cnn`과 `attention` encoder type을 지원합니다.
+
 - `src/lerobot/processor/tactile_processor.py`
-  - Adds tactile validation and temporal filtering processor steps.
-- `src/lerobot/policies/pi0/` and `src/lerobot/policies/pi05/`
-  - Adds tactile encoder config fields.
-  - Adds tactile prefix token support in training and inference.
-  - Allows loading upstream Pi0/Pi0.5 checkpoints while initializing tactile heads from scratch.
+  - tactile shape 검증, temporal filtering 같은 processor step을 넣을 수 있게 했습니다.
 
-### Training With Pi0 / Pi0.5 And Tactile
+- `src/lerobot/policies/pi0/`
+  - Pi0에서 tactile map을 prefix token으로 넣을 수 있게 수정했습니다.
+  - dataset에 `FeatureType.TACTILE` feature가 있으면 자동으로 tactile encoder를 구성합니다.
 
-If the dataset contains `observation.tactile.primary`, Pi0 and Pi0.5 now detect it from
-`config.input_features` and encode it as prefix tokens next to image/language tokens.
-No dataset key rename is needed.
+- `src/lerobot/policies/pi05/`
+  - Pi0.5도 Pi0와 같은 방식으로 tactile prefix token을 사용할 수 있게 수정했습니다.
+  - upstream pretrained Pi0/Pi0.5 checkpoint를 불러올 때 tactile encoder/head는 새로 초기화될 수 있도록 strict load를 조정했습니다.
 
-Example:
+### 실제 센서로 record 하는 예시
+
+기본 config는 `tactile_mock=True`라서 tactile 값이 가짜로 생성됩니다. 실제 Paxini 센서를 연결할 때는 아래처럼 mock을 꺼야 합니다.
+
+```bash
+lerobot-record \
+  --robot.type=paxini_so101_follower \
+  --robot.port=/dev/ttyACM0 \
+  --robot.id=follower_arm \
+  --robot.tactile_mock=false \
+  --robot.tactile_port=/dev/ttyUSB0 \
+  --robot.tactile_baudrate=115200 \
+  --robot.tactile_device_id=1 \
+  --robot.tactile_read_func_code=0x7B \
+  --robot.tactile_read_addr=0x040E \
+  --robot.tactile_taxel_dtype=uint16 \
+  --robot.tactile_image_size=64 \
+  --dataset.repo_id=<your_hf_id>/<your_dataset_name> \
+  --dataset.single_task="your task" \
+  --dataset.num_episodes=10
+```
+
+센서가 `/dev/ttyUSB0`에 보이지 않으면 WSL에서 USB pass-through가 제대로 잡혔는지 먼저 확인해야 합니다. Windows/WSL 환경에서는 포트 이름이 바뀔 수 있으므로 `ls /dev/ttyUSB* /dev/ttyACM*`로 확인하는 것이 좋습니다.
+
+### tactile map xlsx를 쓰는 경우
+
+Paxini 센서의 taxel 실제 좌표가 있으면 xlsx 파일을 넘길 수 있습니다.
+
+```bash
+--robot.tactile_map_path=/path/to/taxel_map.xlsx
+```
+
+xlsx에는 다음 중 하나의 column 조합이 있어야 합니다.
+
+- `x_mm`, `y_mm`
+- `x`, `y`
+- `x(mm)`, `y(mm)`
+
+좌표 파일을 넣으면 taxel raw vector가 실제 센서 배열 위치에 맞춰 `64 x 64` tactile map으로 render됩니다. 좌표 파일이 없으면 mock grid를 사용하므로, 실제 실험 결과 분석에는 좌표 파일을 넣는 쪽이 좋습니다.
+
+### Pi0 / Pi0.5 tactile training
+
+dataset에 `observation.tactile.primary`가 들어 있고, 해당 feature가 `FeatureType.TACTILE`로 잡히면 Pi0/Pi0.5는 tactile feature를 자동으로 감지합니다.
+
+Pi0 예시:
 
 ```bash
 lerobot-train \
   --policy.type=pi0 \
-  --dataset.repo_id=<your_tactile_dataset_repo_id> \
+  --dataset.repo_id=<your_hf_id>/<your_tactile_dataset> \
+  --policy.path=<pi0_pretrained_checkpoint_or_hub_id> \
   --policy.tactile_encoder_type=cnn \
-  --policy.tactile_n_tokens=1
+  --policy.tactile_n_tokens=1 \
+  --batch_size=4 \
+  --steps=10000
 ```
 
-For Pi0.5:
+Pi0.5 예시:
 
 ```bash
 lerobot-train \
   --policy.type=pi05 \
-  --dataset.repo_id=<your_tactile_dataset_repo_id> \
+  --dataset.repo_id=<your_hf_id>/<your_tactile_dataset> \
+  --policy.path=<pi05_pretrained_checkpoint_or_hub_id> \
   --policy.tactile_encoder_type=cnn \
-  --policy.tactile_n_tokens=1
+  --policy.tactile_n_tokens=1 \
+  --batch_size=4 \
+  --steps=10000
 ```
 
-Use `--policy.tactile_encoder_type=attention` if the tactile map is dense enough to benefit from
-spatial attention. The current Paxini renderer outputs a 64x64 normalized map by default.
+권장 사용 방식:
 
-### Main Differences From Upstream
+- tactile map이 단순하고 데이터가 많지 않으면 `--policy.tactile_encoder_type=cnn`부터 시작합니다.
+- taxel 수가 많고 공간 패턴이 중요하면 `--policy.tactile_encoder_type=attention`도 비교합니다.
+- `--policy.tactile_n_tokens=1`로 먼저 smoke test를 돌리고, 성능 비교용으로 `2` 또는 `4`를 실험합니다.
+- Pi0/Pi0.5는 큰 모델이므로 24GB GPU에서는 `batch_size=4` 또는 `8`부터 시작하는 것이 안전합니다.
+- pretrained checkpoint 없이 처음부터 학습하면 비용이 커지고 결과가 불안정할 수 있습니다.
 
-- Adds a Paxini tactile SO-101 follower integration under `src/lerobot_robot_paxini`.
-- Adds Paxini UART frame parsing based on the vendor example protocol:
-  request header `55 AA`, response header `AA 55`, little-endian length/address fields,
-  status byte at offset 13, and two's-complement LRC validation.
-- Stores tactile observations as `observation.tactile.*` float32 2D maps instead of treating
-  tactile data as RGB images or generic robot state.
-- Adds `FeatureType.TACTILE` and dataset feature conversion support for tactile arrays.
-- Adds reusable tactile encoder and processor modules for later ACT/Diffusion/VLA policy wiring.
+### 학습 전에 꼭 확인할 것
 
-This fork is intended for VTLA/VLA experiments that combine vision, robot state/action data,
-language/task inputs, and tactile observations. Most upstream LeRobot workflows still apply,
-but tactile-aware policies must explicitly consume the new `observation.tactile.*` features.
+짧은 smoke test를 먼저 돌리는 것을 권장합니다.
+
+1. recording 1 episode만 실행합니다.
+2. 저장된 dataset metadata에 `observation.tactile.primary`가 있는지 확인합니다.
+3. shape가 `(64, 64)`인지 확인합니다.
+4. tactile 값이 전부 0인지 확인합니다. 전부 0이면 serial read 또는 taxel decode가 실패한 것입니다.
+5. `lerobot-train --steps=10 --batch_size=2`로 import/model forward만 먼저 확인합니다.
+6. 그 다음 긴 training을 돌립니다.
+
+### 다른 tactile 센서를 쓰려면
+
+다른 촉각 센서를 쓰더라도 LeRobot 전체를 다시 고칠 필요는 없습니다. 아래 계약만 지키면 policy 쪽은 대부분 재사용할 수 있습니다.
+
+- 최종 observation key는 `observation.tactile.<name>` 형식으로 둡니다.
+- 값은 `float32` tactile map으로 둡니다.
+- dataset feature type은 `FeatureType.TACTILE`이어야 합니다.
+- policy config의 tactile input shape와 dataset shape가 같아야 합니다.
+
+즉, 다른 센서를 붙일 때 주로 바꿀 곳은 reader/renderer입니다.
+
+- serial protocol이 다르면 `src/lerobot_robot_paxini/paxini_reader.py`를 새 센서용 reader로 교체합니다.
+- taxel 배치가 다르면 `src/lerobot_robot_paxini/tactile_render.py`의 mapping logic을 바꿉니다.
+- observation key와 `FeatureType.TACTILE` 구조는 그대로 유지하는 것이 좋습니다.
+
+### 이 repo를 만든 이유
+
+VTLA 실험에서는 시각 정보만으로는 접촉 여부, 미끄러짐, 압력 변화, 삽입/정렬 같은 정보를 놓치기 쉽습니다.
+그래서 이 fork는 LeRobot의 기존 vision-language-action pipeline에 tactile signal을 정식 observation으로 넣는 것을 목표로 합니다.
+
+현재 상태는 Paxini/SO-101 tactile 실험을 시작할 수 있는 baseline입니다. 실험을 안정화하려면 실제 센서 frame format, taxel 좌표 파일, normalization scale, dataset 품질 확인을 프로젝트 환경에 맞게 조정해야 합니다.
 
 <p align="center">
   <img alt="LeRobot, Hugging Face Robotics Library" src="./media/readme/lerobot-logo-thumbnail.png" width="100%">
