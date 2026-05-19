@@ -9,16 +9,18 @@ from lerobot.robots.so_follower.config_so_follower import SOFollowerConfig
 @RobotConfig.register_subclass("paxini_so101_follower")
 @dataclass
 class PaxiniSO101FollowerConfig(RobotConfig, SOFollowerConfig):
-    tactile_port: str = "/dev/ttyUSB0"  # 실제 포트로 바꿔야 함
-    tactile_baudrate: int = 115200
-    tactile_device_id: int = 0x01
-    tactile_read_func_code: int = 0x7B
-    tactile_read_addr: int = 0x040E
-    tactile_read_len: int | None = None
+    tactile_port: str = "/dev/ttyACM0"
+    tactile_baudrate: int = 921600
     tactile_timeout_s: float = 0.5
-    tactile_taxel_dtype: str = "uint16"
-    tactile_taxel_scale: float | None = None
+    tactile_taxel_scale: float = 0.1
+    tactile_taxel_value_mode: str = "z"
+    tactile_skip_bytes: int = 0
     tactile_map_path: str | None = None
     tactile_image_size: int = 64
-    tactile_num_taxels: int = 100
-    tactile_mock: bool = True
+    tactile_num_taxels: int = 154
+    tactile_representation: str = "heatmap"
+    tactile_grid_normalize: bool = True
+    tactile_mock: bool = False
+    tactile_csv_path: str | None = None
+    tactile_csv_scale: float = 1.0
+    tactile_csv_loop: bool = True

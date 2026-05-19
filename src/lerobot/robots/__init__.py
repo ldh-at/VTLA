@@ -18,4 +18,9 @@ from .config import RobotConfig
 from .robot import Robot
 from .utils import make_robot_from_config
 
+try:
+    import lerobot_robot_paxini as paxini_so101  # noqa: F401
+except ImportError:
+    paxini_so101 = None
+
 __all__ = ["Robot", "RobotConfig", "make_robot_from_config"]

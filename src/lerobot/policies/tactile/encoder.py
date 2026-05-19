@@ -17,7 +17,7 @@
 
 These modules consume a normalized tactile map and produce token embeddings that
 can be attached to policies such as ACT, Diffusion, or VLA-style token models.
-Expected input shapes are (H, W), (B, H, W), or (B, 1, H, W).
+Expected input shapes are (H, W), (B, H, W), (C, H, W), or (B, C, H, W).
 """
 
 import torch
@@ -25,15 +25,25 @@ import torch.nn.functional as F  # noqa: N812
 from torch import Tensor, nn
 
 
-def _as_bchw(x: Tensor) -> Tensor:
-    if x.dim() == 2:
+def _parse_input_shape(input_shape: tuple[int, ...]) -> tuple[int, tuple[int, int]]:
+    if len(input_shape) == 2:
+        return 1, (input_shape[0], input_shape[1])
+    if len(input_shape) == 3:
+        return input_shape[0], (input_shape[1], input_shape[2])
+    raise ValueError(f"Expected tactile input_shape (H, W) or (C, H, W), got {input_shape}.")
+
+
+def _as_bchw(x: Tensor, input_channels: int) -> Tensor:
+    if x.dim() == 2 and input_channels == 1:
         return x.unsqueeze(0).unsqueeze(0)
-    if x.dim() == 3:
+    if x.dim() == 3 and input_channels == 1:
         return x.unsqueeze(1)
-    if x.dim() == 4 and x.shape[1] == 1:
+    if x.dim() == 3 and x.shape[0] == input_channels:
+        return x.unsqueeze(0)
+    if x.dim() == 4 and x.shape[1] == input_channels:
         return x
     raise ValueError(
-        "Expected tactile tensor shape (H, W), (B, H, W), or (B, 1, H, W), "
+        "Expected tactile tensor shape (H, W), (B, H, W), (C, H, W), or (B, C, H, W), "
         f"got {tuple(x.shape)}."
     )
 
@@ -41,12 +51,13 @@ def _as_bchw(x: Tensor) -> Tensor:
 class TactileCNN(nn.Module):
     """CNN tactile backbone that outputs one feature vector per sample."""
 
-    def __init__(self, input_shape: tuple[int, int] = (12, 32), feature_dim: int = 256, dropout: float = 0.3):
+    def __init__(self, input_shape: tuple[int, ...] = (64, 64), feature_dim: int = 256, dropout: float = 0.3):
         super().__init__()
         self.input_shape = input_shape
         self.feature_dim = feature_dim
+        self.input_channels, spatial_shape = _parse_input_shape(input_shape)
 
-        self.conv1 = nn.Conv2d(1, 32, kernel_size=3, padding=1)
+        self.conv1 = nn.Conv2d(self.input_channels, 32, kernel_size=3, padding=1)
         self.bn1 = nn.BatchNorm2d(32)
         self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
         self.bn2 = nn.BatchNorm2d(64)
@@ -56,8 +67,8 @@ class TactileCNN(nn.Module):
         self.pool = nn.MaxPool2d(2, 2)
         self.dropout = nn.Dropout(dropout)
 
-        feature_h = input_shape[0] // 8
-        feature_w = input_shape[1] // 8
+        feature_h = spatial_shape[0] // 8
+        feature_w = spatial_shape[1] // 8
         if feature_h <= 0 or feature_w <= 0:
             raise ValueError(f"Tactile input_shape must be at least 8x8, got {input_shape}.")
         conv_output_dim = 128 * feature_h * feature_w
@@ -66,7 +77,7 @@ class TactileCNN(nn.Module):
         self.fc2 = nn.Linear(512, feature_dim)
 
     def forward(self, x: Tensor) -> Tensor:
-        x = _as_bchw(x).float()
+        x = _as_bchw(x, self.input_channels).float()
         x = self.pool(F.relu(self.bn1(self.conv1(x))))
         x = self.pool(F.relu(self.bn2(self.conv2(x))))
         x = self.pool(F.relu(self.bn3(self.conv3(x))))
@@ -79,12 +90,13 @@ class TactileCNN(nn.Module):
 class TactileAttentionCNN(nn.Module):
     """CNN tactile backbone with spatial attention."""
 
-    def __init__(self, input_shape: tuple[int, int] = (12, 32), feature_dim: int = 256, dropout: float = 0.4):
+    def __init__(self, input_shape: tuple[int, ...] = (64, 64), feature_dim: int = 256, dropout: float = 0.4):
         super().__init__()
         self.input_shape = input_shape
         self.feature_dim = feature_dim
+        self.input_channels, _ = _parse_input_shape(input_shape)
 
-        self.conv1 = nn.Conv2d(1, 64, kernel_size=3, padding=1)
+        self.conv1 = nn.Conv2d(self.input_channels, 64, kernel_size=3, padding=1)
         self.bn1 = nn.BatchNorm2d(64)
         self.conv2 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
         self.bn2 = nn.BatchNorm2d(128)
@@ -108,7 +120,7 @@ class TactileAttentionCNN(nn.Module):
         )
 
     def forward(self, x: Tensor) -> Tensor:
-        x = _as_bchw(x).float()
+        x = _as_bchw(x, self.input_channels).float()
         x = self.pool(F.relu(self.bn1(self.conv1(x))))
         x = self.pool(F.relu(self.bn2(self.conv2(x))))
         x = self.pool(F.relu(self.bn3(self.conv3(x))))
@@ -123,7 +135,7 @@ class TactileTokenEncoder(nn.Module):
     """Wrap a tactile CNN backbone and output policy token embeddings.
 
     Forward input:
-        (H, W), (B, H, W), or (B, 1, H, W)
+        (H, W), (B, H, W), (C, H, W), or (B, C, H, W)
 
     Forward output:
         (B, n_tokens, feature_dim)
@@ -132,7 +144,7 @@ class TactileTokenEncoder(nn.Module):
     def __init__(
         self,
         encoder_type: str,
-        input_shape: tuple[int, int],
+        input_shape: tuple[int, ...],
         feature_dim: int,
         n_tokens: int = 1,
         dropout: float = 0.3,

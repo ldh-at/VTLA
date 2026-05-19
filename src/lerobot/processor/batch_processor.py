@@ -22,11 +22,12 @@ These steps are designed to process actions, observations, and complementary dat
 
 from dataclasses import dataclass, field
 
+import numpy as np
 from torch import Tensor
 
 from lerobot.configs import PipelineFeatureType, PolicyFeature
 from lerobot.types import EnvTransition, PolicyAction
-from lerobot.utils.constants import OBS_ENV_STATE, OBS_IMAGE, OBS_IMAGES, OBS_STATE
+from lerobot.utils.constants import OBS_ENV_STATE, OBS_IMAGE, OBS_IMAGES, OBS_STATE, OBS_TACTILE
 
 from .pipeline import (
     ComplementaryDataProcessorStep,
@@ -117,6 +118,12 @@ class AddBatchDimensionObservationStep(ObservationProcessorStep):
         for key, value in observation.items():
             if key.startswith(f"{OBS_IMAGES}.") and isinstance(value, Tensor) and value.dim() == 3:
                 observation[key] = value.unsqueeze(0)
+            elif (key == OBS_TACTILE or key.startswith(f"{OBS_TACTILE}.")) and isinstance(value, Tensor):
+                if value.dim() in (2, 3):
+                    observation[key] = value.unsqueeze(0)
+            elif (key == OBS_TACTILE or key.startswith(f"{OBS_TACTILE}.")) and isinstance(value, np.ndarray):
+                if value.ndim in (2, 3):
+                    observation[key] = value[None, ...]
         return observation
 
     def transform_features(

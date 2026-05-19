@@ -1,0 +1,469 @@
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>Paxini Pi0.5 Guide</title><style>
+@page { size: A4; margin: 18mm 16mm; }
+body { font-family: "Segoe UI", "Malgun Gothic", Arial, sans-serif; color: #111827; line-height: 1.62; max-width: 960px; margin: 0 auto; }
+h1 { font-size: 28px; border-bottom: 3px solid #111827; padding-bottom: 10px; margin-top: 0; }
+h2 { font-size: 21px; margin-top: 34px; border-bottom: 1px solid #d1d5db; padding-bottom: 6px; }
+h3 { font-size: 17px; margin-top: 24px; }
+code { font-family: "Cascadia Mono", Consolas, monospace; background: #f3f4f6; padding: 1px 4px; border-radius: 4px; }
+pre { background: #111827; color: #f9fafb; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 12px; line-height: 1.45; }
+pre code { background: transparent; color: inherit; padding: 0; }
+table { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 13px; }
+th, td { border: 1px solid #d1d5db; padding: 8px 10px; vertical-align: top; }
+th { background: #f3f4f6; }
+li { margin: 4px 0; }
+</style></head><body><h1>Paxini Ring/Pinky 촉각 + LeRobot Pi0.5 한국어 가이드</h1>
+<h2>1. 목표</h2>
+<p>이 문서는 다음 목표를 위해 작성했습니다.</p>
+<ol>
+<li>Paxini GEN3 tactile sensor를 LeRobot SO101 follower에 붙입니다.</li>
+<li>ring/pinky tactile 값을 LeRobot dataset feature로 저장합니다.</li>
+<li>저장된 dataset을 Pi0.5 policy가 읽을 수 있게 만듭니다.</li>
+<li>실제 센서가 없어도 PXSR CSV로 record/train 파이프라인을 검증합니다.</li>
+<li>공식 Hugging Face LeRobot과 현재 repo의 차이를 한눈에 확인합니다.</li>
+</ol>
+<p>현재 추천 tactile 표현은 <code>(2, 9, 9)</code>입니다.</p>
+<pre><code class="language-text">channel 0: ring proximal  77 taxels -&gt; 9x9, four corners padded with 0
+channel 1: pinky proximal 77 taxels -&gt; 9x9, four corners padded with 0
+final shape: (2, 9, 9)
+</code></pre>
+<p>이렇게 하면 Pi0.5 tactile CNN의 첫 layer가 <code>Conv2d(in_channels=2, kernel_size=3)</code>가 되어 ring/pinky를 처음부터 같이 볼 수 있습니다.</p>
+<h2>2. 전체 구조</h2>
+<pre><code class="language-text">Paxini sensor or PXSR CSV
+        |
+        v
+PaxiniReader
+        |
+        v
+154 taxel vector
+        |
+        +--&gt; heatmap       -&gt; observation.tactile.primary: (64, 64)
+        |
+        +--&gt; stacked_9x9   -&gt; observation.tactile.primary: (2, 9, 9)
+                                recommended
+
+SO101 follower state --------------+
+Camera image ----------------------+--&gt; LeRobotDataset
+Tactile observation ---------------+
+Leader action ---------------------+
+Task text -------------------------+
+
+LeRobotDataset
+        |
+        v
+Pi0.5 policy
+        |
+        +--&gt; image encoder
+        +--&gt; state/action processor
+        +--&gt; tactile CNN token encoder
+        +--&gt; action expert
+</code></pre>
+<h2>3. 공식 LeRobot 대비 현재 repo 변경점</h2>
+<p>공식 기준은 <code>origin/main</code>입니다.</p>
+<table>
+<thead>
+<tr>
+<th>영역</th>
+<th>공식 LeRobot</th>
+<th>현재 repo 변경</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Robot type</td>
+<td>기본 SO100/SO101 follower만 있음</td>
+<td><code>paxini_so101_follower</code> 추가</td>
+</tr>
+<tr>
+<td>Tactile feature type</td>
+<td>기본 feature에 tactile 없음</td>
+<td><code>FeatureType.TACTILE</code>, <code>OBS_TACTILE</code> 경로 추가</td>
+</tr>
+<tr>
+<td>Robot observation</td>
+<td>joint/camera 중심</td>
+<td><code>observation.tactile.primary</code> 추가</td>
+</tr>
+<tr>
+<td>Pi0/Pi0.5 policy</td>
+<td>image/state/action 중심</td>
+<td>tactile prefix token encoder 추가</td>
+</tr>
+<tr>
+<td>Tactile encoder</td>
+<td>없음</td>
+<td>CNN/attention CNN encoder 추가</td>
+</tr>
+<tr>
+<td>Dataset feature 변환</td>
+<td>image/state/action 중심</td>
+<td>tactile feature를 float32 tensor로 저장</td>
+</tr>
+<tr>
+<td>Processor</td>
+<td>tactile batch/validation 없음</td>
+<td>tactile batch dimension/validation processor 추가</td>
+</tr>
+<tr>
+<td>Sensor reader</td>
+<td>없음</td>
+<td>serial, mock, PXSR CSV reader 추가</td>
+</tr>
+<tr>
+<td>CSV smoke test</td>
+<td>없음</td>
+<td><code>make_pi05_smoke_dataset.py</code> 추가</td>
+</tr>
+</tbody>
+</table>
+<h2>4. 변경 파일 요약</h2>
+<h3>Paxini 전용 패키지</h3>
+<table>
+<thead>
+<tr>
+<th>파일</th>
+<th>역할</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>src/lerobot_robot_paxini/__init__.py</code></td>
+<td>Paxini robot/config export</td>
+</tr>
+<tr>
+<td><code>config_paxini_so101.py</code></td>
+<td>tactile port, taxel 수, representation 설정</td>
+</tr>
+<tr>
+<td><code>paxini_reader.py</code></td>
+<td>serial/mock/CSV tactile reader</td>
+</tr>
+<tr>
+<td><code>paxini_so101.py</code></td>
+<td>SO101 follower에 tactile observation 추가</td>
+</tr>
+<tr>
+<td><code>tactile_render.py</code></td>
+<td>154 taxel -&gt; heatmap 또는 2x9x9 변환</td>
+</tr>
+<tr>
+<td><code>types.py</code></td>
+<td><code>PaxiniSample</code> dataclass</td>
+</tr>
+<tr>
+<td><code>make_pi05_smoke_dataset.py</code></td>
+<td>센서 없이 LeRobot dataset 생성</td>
+</tr>
+<tr>
+<td><code>README.md</code></td>
+<td>짧은 사용 가이드</td>
+</tr>
+<tr>
+<td><code>PAXINI_PI05_GUIDE.ko.md</code></td>
+<td>이 문서</td>
+</tr>
+</tbody>
+</table>
+<h3>LeRobot core 변경</h3>
+<table>
+<thead>
+<tr>
+<th>파일</th>
+<th>변경 내용</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>src/lerobot/robots/__init__.py</code></td>
+<td><code>lerobot_robot_paxini</code> 자동 import로 robot type 등록</td>
+</tr>
+<tr>
+<td><code>src/lerobot/utils/constants.py</code></td>
+<td>tactile observation prefix 추가</td>
+</tr>
+<tr>
+<td><code>src/lerobot/utils/feature_utils.py</code></td>
+<td>tactile feature를 dataset/policy feature로 변환</td>
+</tr>
+<tr>
+<td><code>src/lerobot/configs/types.py</code></td>
+<td>tactile feature type 추가</td>
+</tr>
+<tr>
+<td><code>src/lerobot/configs/policies.py</code></td>
+<td>tactile feature 접근용 helper 추가</td>
+</tr>
+<tr>
+<td><code>src/lerobot/processor/batch_processor.py</code></td>
+<td>tactile tensor/array에 batch dimension 추가</td>
+</tr>
+<tr>
+<td><code>src/lerobot/processor/tactile_processor.py</code></td>
+<td>tactile shape validation/temporal filter</td>
+</tr>
+<tr>
+<td><code>src/lerobot/processor/__init__.py</code></td>
+<td>tactile processor export</td>
+</tr>
+<tr>
+<td><code>src/lerobot/policies/tactile/encoder.py</code></td>
+<td>tactile CNN token encoder 추가</td>
+</tr>
+<tr>
+<td><code>src/lerobot/policies/pi0/configuration_pi0.py</code></td>
+<td>Pi0 tactile config 추가</td>
+</tr>
+<tr>
+<td><code>src/lerobot/policies/pi0/modeling_pi0.py</code></td>
+<td>Pi0 tactile token 입력 추가</td>
+</tr>
+<tr>
+<td><code>src/lerobot/policies/pi05/configuration_pi05.py</code></td>
+<td>Pi0.5 tactile config 추가</td>
+</tr>
+<tr>
+<td><code>src/lerobot/policies/pi05/modeling_pi05.py</code></td>
+<td>Pi0.5 tactile token 입력 추가</td>
+</tr>
+</tbody>
+</table>
+<h2>5. 센서 데이터 해석</h2>
+<p>현재 확인된 연결은 ring proximal과 pinky proximal입니다.</p>
+<pre><code class="language-text">Ring proximal  : 77 taxels
+Pinky proximal : 77 taxels
+Total          : 154 taxels
+</code></pre>
+<p>PXSR CSV 컬럼 예시는 다음과 같습니다.</p>
+<pre><code class="language-text">3-0-NxN-Z[0] ... 3-0-NxN-Z[76]
+4-0-NxN-Z[0] ... 4-0-NxN-Z[76]
+</code></pre>
+<p>이 문서에서는 <code>3-0</code>을 ring, <code>4-0</code>을 pinky로 취급합니다.</p>
+<h2>6. 왜 <code>(2, 9, 9)</code>가 좋은가</h2>
+<p>처음 구현은 154개 값을 <code>(64, 64)</code> heatmap으로 흩뿌리는 방식이었습니다. 이 방식도 동작하지만 작은 tactile array를 큰 이미지처럼 보간하기 때문에 실제 센서 배열 구조가 흐려질 수 있습니다.</p>
+<p>반면 <code>(2, 9, 9)</code>는 다음 장점이 있습니다.</p>
+<ul>
+<li>ring과 pinky가 서로 다른 channel로 유지됩니다.</li>
+<li>77개 taxel의 원래 격자성이 보존됩니다.</li>
+<li>네 모서리만 0으로 padding하므로 불필요한 보간이 없습니다.</li>
+<li>CNN kernel <code>3x3</code>가 인접 taxel 관계를 직접 볼 수 있습니다.</li>
+<li>Pi0.5 앞단에서 tactile token으로 넣기 쉽습니다.</li>
+</ul>
+<p>현재 구현은 depthwise convolution이 아닙니다. 첫 convolution이 <code>Conv2d(2, 32, kernel_size=3, padding=1)</code>처럼 동작해서 두 손가락 channel을 처음부터 섞어 볼 수 있습니다.</p>
+<h2>7. 환경 설정</h2>
+<p>repo 루트에서 실행합니다.</p>
+<pre><code class="language-bash">cd /mnt/c/Users/dlehg/conference/vtla
+conda activate lerobot
+export PYTHONPATH=/mnt/c/Users/dlehg/conference/vtla/lerobot/src:$PYTHONPATH
+</code></pre>
+<p>포트 확인:</p>
+<pre><code class="language-bash">ls -l /dev/serial/by-id/
+python -m serial.tools.list_ports -v
+</code></pre>
+<p>Windows PXSR 앱이 COM 포트를 잡고 있으면 WSL에서 동시에 읽을 수 없습니다.</p>
+<h2>8. 센서 없이 CSV로 dataset 만들기</h2>
+<p>PXSR CSV가 있으면 실제 tactile sensor 없이도 LeRobot dataset을 만들 수 있습니다.</p>
+<pre><code class="language-bash">conda run -n lerobot python -m lerobot_robot_paxini.make_pi05_smoke_dataset \
+  --repo-id local/paxini_pi05_smoke_2x9x9 \
+  --root /tmp/lerobot_paxini_smoke_2x9x9 \
+  --csv /mnt/c/Users/dlehg/AppData/Roaming/pxsr-gen3/DataLogging/2026-05-16-182429.csv \
+  --frames 32 \
+  --fps 10 \
+  --tactile-representation stacked_9x9
+</code></pre>
+<p>정상 생성 결과:</p>
+<pre><code class="language-text">Created dataset repo_id=local/paxini_pi05_smoke_2x9x9
+Dataset root=/tmp/lerobot_paxini_smoke_2x9x9
+Frames=32, tactile_shape=(2, 9, 9)
+</code></pre>
+<p>shape 확인:</p>
+<pre><code class="language-bash">conda run -n lerobot python -c &quot;\
+from lerobot.datasets import LeRobotDataset; \
+ds=LeRobotDataset('local/paxini_pi05_smoke_2x9x9', root='/tmp/lerobot_paxini_smoke_2x9x9'); \
+item=ds[0]; \
+print(len(ds)); \
+print(item['observation.state'].shape); \
+print(item['observation.tactile.primary'].shape); \
+print(item['observation.images.front'].shape); \
+print(item['action'].shape)&quot;
+</code></pre>
+<p>기대 출력:</p>
+<pre><code class="language-text">32
+torch.Size([6])
+torch.Size([2, 9, 9])
+torch.Size([3, 224, 224])
+torch.Size([6])
+</code></pre>
+<h2>9. 실제 센서로 teleoperate</h2>
+<pre><code class="language-bash">lerobot-teleoperate \
+  --robot.type=paxini_so101_follower \
+  --robot.port=/dev/ttyACM_FOLLOWER \
+  --robot.id=so101_paxini \
+  --robot.tactile_port=/dev/ttyACM_SENSOR \
+  --robot.tactile_num_taxels=154 \
+  --robot.tactile_representation=stacked_9x9 \
+  --teleop.type=so101_leader \
+  --teleop.port=/dev/ttyACM_LEADER \
+  --teleop.id=so101_leader \
+  --fps=30 \
+  --display_data=true
+</code></pre>
+<p>센서 없이 robot code path만 확인하려면:</p>
+<pre><code class="language-bash">lerobot-teleoperate \
+  --robot.type=paxini_so101_follower \
+  --robot.port=/dev/ttyACM_FOLLOWER \
+  --robot.id=so101_paxini \
+  --robot.tactile_mock=true \
+  --robot.tactile_num_taxels=154 \
+  --robot.tactile_representation=stacked_9x9 \
+  --teleop.type=so101_leader \
+  --teleop.port=/dev/ttyACM_LEADER \
+  --teleop.id=so101_leader \
+  --fps=30
+</code></pre>
+<p>CSV를 센서 대신 replay하려면:</p>
+<pre><code class="language-bash">lerobot-teleoperate \
+  --robot.type=paxini_so101_follower \
+  --robot.port=/dev/ttyACM_FOLLOWER \
+  --robot.id=so101_paxini \
+  --robot.tactile_csv_path=/mnt/c/Users/dlehg/AppData/Roaming/pxsr-gen3/DataLogging/2026-05-16-182429.csv \
+  --robot.tactile_num_taxels=154 \
+  --robot.tactile_representation=stacked_9x9 \
+  --teleop.type=so101_leader \
+  --teleop.port=/dev/ttyACM_LEADER \
+  --teleop.id=so101_leader \
+  --fps=30
+</code></pre>
+<h2>10. record</h2>
+<p>record의 프레임 흐름은 다음입니다.</p>
+<pre><code class="language-text">robot.get_observation()
+teleop.get_action()
+robot.send_action()
+dataset.add_frame()
+</code></pre>
+<p>실제 기록 명령:</p>
+<pre><code class="language-bash">lerobot-record \
+  --robot.type=paxini_so101_follower \
+  --robot.port=/dev/ttyACM_FOLLOWER \
+  --robot.id=so101_paxini \
+  --robot.tactile_port=/dev/ttyACM_SENSOR \
+  --robot.tactile_num_taxels=154 \
+  --robot.tactile_representation=stacked_9x9 \
+  --robot.cameras='{front: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30}}' \
+  --teleop.type=so101_leader \
+  --teleop.port=/dev/ttyACM_LEADER \
+  --teleop.id=so101_leader \
+  --dataset.repo_id=dlehg/so101_paxini_ring_pinky \
+  --dataset.single_task=&quot;pick up the object using ring and pinky tactile feedback&quot; \
+  --dataset.fps=30 \
+  --dataset.num_episodes=5 \
+  --dataset.episode_time_s=30 \
+  --dataset.reset_time_s=10 \
+  --dataset.push_to_hub=false
+</code></pre>
+<p>처음에는 <code>num_episodes=1</code>로 시작하는 것을 권장합니다.</p>
+<h2>11. replay</h2>
+<p>replay는 학습이 아니라 저장된 action을 다시 보내는 검증입니다.</p>
+<pre><code class="language-bash">lerobot-replay \
+  --robot.type=paxini_so101_follower \
+  --robot.port=/dev/ttyACM_FOLLOWER \
+  --robot.id=so101_paxini \
+  --robot.tactile_port=/dev/ttyACM_SENSOR \
+  --robot.tactile_num_taxels=154 \
+  --robot.tactile_representation=stacked_9x9 \
+  --dataset.repo_id=dlehg/so101_paxini_ring_pinky_YYYYMMDD_HHMMSS \
+  --dataset.episode=0
+</code></pre>
+<h2>12. Pi0.5 train</h2>
+<p>LeRobot에서 Pi0.5 policy type은 <code>pi05</code>입니다.</p>
+<p>작은 smoke train:</p>
+<pre><code class="language-bash">lerobot-train \
+  --dataset.repo_id=local/paxini_pi05_smoke_2x9x9 \
+  --dataset.root=/tmp/lerobot_paxini_smoke_2x9x9 \
+  --policy.type=pi05 \
+  --policy.paligemma_variant=gemma_300m \
+  --policy.action_expert_variant=gemma_300m \
+  --policy.dtype=bfloat16 \
+  --policy.device=cuda \
+  --policy.tactile_encoder_type=cnn \
+  --policy.train_expert_only=true \
+  --policy.push_to_hub=false \
+  --batch_size=1 \
+  --steps=1 \
+  --num_workers=0 \
+  --eval_freq=0 \
+  --save_freq=1 \
+  --wandb.enable=false
+</code></pre>
+<p>실제 fine-tune:</p>
+<pre><code class="language-bash">lerobot-train \
+  --dataset.repo_id=dlehg/so101_paxini_ring_pinky_YYYYMMDD_HHMMSS \
+  --policy.path=lerobot/pi05_base \
+  --policy.dtype=bfloat16 \
+  --policy.device=cuda \
+  --policy.tactile_encoder_type=cnn \
+  --policy.train_expert_only=true \
+  --policy.push_to_hub=false \
+  --batch_size=1 \
+  --steps=3000 \
+  --save_freq=1000 \
+  --eval_freq=0 \
+  --wandb.enable=false
+</code></pre>
+<h2>13. rollout</h2>
+<p>학습된 policy로 실제 로봇을 움직일 때는 <code>lerobot-rollout</code>을 씁니다.</p>
+<pre><code class="language-bash">lerobot-rollout \
+  --strategy.type=base \
+  --policy.path=outputs/train/YYYY-MM-DD/HH-MM-SS_pi05/checkpoints/last/pretrained_model \
+  --inference.type=rtc \
+  --inference.rtc.execution_horizon=10 \
+  --robot.type=paxini_so101_follower \
+  --robot.port=/dev/ttyACM_FOLLOWER \
+  --robot.id=so101_paxini \
+  --robot.tactile_port=/dev/ttyACM_SENSOR \
+  --robot.tactile_num_taxels=154 \
+  --robot.tactile_representation=stacked_9x9 \
+  --task=&quot;pick up the object using ring and pinky tactile feedback&quot; \
+  --duration=60
+</code></pre>
+<h2>14. 검증 체크리스트</h2>
+<h3>Dataset 생성 후</h3>
+<pre><code class="language-text">observation.state:          torch.Size([6])
+observation.tactile.primary torch.Size([2, 9, 9])
+observation.images.front:   torch.Size([3, 224, 224])
+action:                     torch.Size([6])
+</code></pre>
+<h3>Tactile CNN 확인</h3>
+<pre><code class="language-python">from lerobot.policies.tactile import TactileTokenEncoder
+import torch
+
+enc = TactileTokenEncoder(&quot;cnn&quot;, input_shape=(2, 9, 9), feature_dim=32)
+y = enc(torch.randn(4, 2, 9, 9))
+print(y.shape)
+print(enc.backbone.conv1.in_channels)
+</code></pre>
+<p>기대 출력:</p>
+<pre><code class="language-text">torch.Size([4, 1, 32])
+2
+</code></pre>
+<h2>15. 자주 확인할 것</h2>
+<ul>
+<li><code>tactile_num_taxels</code>는 ring+pinky proximal 기준 <code>154</code>입니다.</li>
+<li><code>158</code>로 들어가면 total force byte까지 taxel로 잘못 센 가능성이 큽니다.</li>
+<li><code>stacked_9x9</code>는 154개가 정확히 들어올 때 가장 깔끔합니다.</li>
+<li>실제 sensor와 PXSR Windows 앱은 같은 COM port를 동시에 잡을 수 없습니다.</li>
+<li>처음에는 CSV smoke dataset으로 train 경로를 먼저 확인한 뒤 실제 record로 넘어갑니다.</li>
+</ul>
+<h2>16. 추천 순서</h2>
+<ol>
+<li>PXSR CSV로 <code>stacked_9x9</code> smoke dataset 생성</li>
+<li>dataset shape 확인</li>
+<li>tactile CNN forward 확인</li>
+<li>Pi0.5 smoke train 1 step</li>
+<li>실제 센서 연결</li>
+<li><code>lerobot-teleoperate</code>로 로봇과 tactile 연결 확인</li>
+<li><code>lerobot-record</code>로 1 episode 기록</li>
+<li><code>lerobot-replay</code>로 action 검증</li>
+<li>충분한 episode 기록</li>
+<li>Pi0.5 fine-tune</li>
+<li><code>lerobot-rollout</code>으로 실제 실행</li>
+</ol>
+</body></html>

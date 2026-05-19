@@ -23,6 +23,50 @@ def make_mock_taxel_map(num_taxels: int = 100) -> TaxelMap:
     return TaxelMap(x_mm=xs.ravel()[:num_taxels], y_mm=ys.ravel()[:num_taxels])
 
 
+def taxels_to_stacked_9x9(
+    taxels: np.ndarray,
+    *,
+    sensors: int = 2,
+    taxels_per_sensor: int = 77,
+    normalize: bool = True,
+) -> np.ndarray:
+    """Convert 77-taxel M3025-like sensor arrays into a stacked 9x9 grid.
+
+    The observed 77-point layout is treated as a 9x9 array with the four corner
+    cells absent. Missing corners are filled with 0, and each sensor becomes one
+    channel. For ring+pinky this returns shape ``(2, 9, 9)``.
+    """
+    values = np.asarray(taxels, dtype=np.float32).reshape(-1)
+    expected = sensors * taxels_per_sensor
+    if values.shape[0] < expected:
+        padded = np.zeros(expected, dtype=np.float32)
+        padded[: values.shape[0]] = values
+        values = padded
+    else:
+        values = values[:expected]
+
+    grid = np.zeros((sensors, 9, 9), dtype=np.float32)
+    valid_positions = [
+        (row, col)
+        for row in range(9)
+        for col in range(9)
+        if not ((row in (0, 8)) and (col in (0, 8)))
+    ]
+
+    for sensor_idx in range(sensors):
+        start = sensor_idx * taxels_per_sensor
+        sensor_values = values[start : start + taxels_per_sensor]
+        for value, (row, col) in zip(sensor_values, valid_positions, strict=True):
+            grid[sensor_idx, row, col] = max(float(value), 0.0)
+
+    if normalize:
+        denom = float(grid.max(initial=0.0))
+        if denom > 0:
+            grid = np.clip(grid / denom, 0.0, 1.0)
+
+    return grid.astype(np.float32, copy=False)
+
+
 def load_taxel_map_xlsx(path: str | Path) -> TaxelMap:
     import pandas as pd
 

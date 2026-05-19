@@ -586,7 +586,7 @@ class PI0Pytorch(nn.Module):  # see openpi `PI0Pytorch`
             [
                 TactileTokenEncoder(
                     encoder_type=config.tactile_encoder_type,
-                    input_shape=tuple(feature.shape[-2:]),
+                    input_shape=tuple(feature.shape),
                     feature_dim=paligemma_config.width,
                     n_tokens=config.tactile_n_tokens,
                     dropout=config.tactile_dropout,
@@ -1297,7 +1297,7 @@ class PI0Policy(PreTrainedPolicy):
 
             if tactile.dim() == 5:
                 tactile = tactile[:, -1]
-            elif tactile.dim() == 4 and tactile.shape[1] != 1:
+            elif len(feature.shape) == 2 and tactile.dim() == 4 and tactile.shape[1] != 1:
                 tactile = tactile[:, -1]
 
             tactile_maps.append(tactile)

@@ -33,7 +33,7 @@ def _is_tactile_key(key: str) -> bool:
 class TactileValidationProcessorStep(ObservationProcessorStep):
     """Validate tactile observation shape and convert arrays to float tensors."""
 
-    def __init__(self, expected_shape: tuple[int, int] = (12, 32)):
+    def __init__(self, expected_shape: tuple[int, int] = (64, 64)):
         self.expected_shape = tuple(expected_shape)
 
     def observation(self, obs: dict[str, Any]) -> dict[str, Any]:
@@ -53,7 +53,7 @@ class TactileValidationProcessorStep(ObservationProcessorStep):
                 tactile_data = tactile_data.squeeze(1)
             elif tactile_data.dim() not in (2, 3):
                 raise ValueError(
-                    f"Tactile observation '{key}' must have shape (H, W), (B, H, W), or (B, 1, H, W); "
+                    f"Tactile observation '{key}' must have shape (H, W), (B, H, W), or (C, H, W); "
                     f"got {tuple(tactile_data.shape)}."
                 )
 
