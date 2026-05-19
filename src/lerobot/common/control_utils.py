@@ -18,7 +18,10 @@ from __future__ import annotations
 # Utilities
 ########################################################################################
 import logging
-import traceback
+import select
+import sys
+import termios
+import threading
 from contextlib import nullcontext
 from copy import copy
 from functools import cache
@@ -59,14 +62,7 @@ def is_headless():
 
         return False
     except Exception:
-        print(
-            "Error trying to import pynput. Switching to headless mode. "
-            "As a result, the video stream from the cameras won't be shown, "
-            "and you won't be able to change the control flow with keyboards. "
-            "For more info, see traceback below.\n"
-        )
-        traceback.print_exc()
-        print()
+        logging.debug("pynput is unavailable; treating this process as headless for GUI-only checks.")
         return True
 
 
@@ -125,7 +121,7 @@ def init_keyboard_listener():
     """
     Initializes a non-blocking keyboard listener for real-time user interaction.
 
-    This function sets up a listener for specific keys (right arrow, left arrow, escape) to control
+    This function sets up a listener for specific keys to control
     the program flow during execution, such as stopping recording or exiting loops. It gracefully
     handles headless environments where keyboard listening is not possible.
 
@@ -137,34 +133,33 @@ def init_keyboard_listener():
     # Allow to exit early while recording an episode or resetting the environment,
     # by tapping the right arrow key '->'. This might require a sudo permission
     # to allow your terminal to monitor keyboard events.
-    events = {}
-    events["exit_early"] = False
-    events["rerecord_episode"] = False
-    events["stop_recording"] = False
+    events = _make_control_events()
 
-    if is_headless():
+    try:
+        from pynput import keyboard
+    except Exception:
+        listener = _TerminalKeyboardListener(events)
+        if listener.start():
+            logging.info("Using terminal keyboard controls: S=start, D=end episode, ESC=stop.")
+            return listener, events
+
         logging.warning(
-            "Headless environment detected. On-screen cameras display and keyboard inputs will not be available."
+            "Keyboard listener is unavailable. Install pynput or run from an interactive terminal "
+            "to use S/D/ESC controls."
         )
-        listener = None
-        return listener, events
-
-    # Only import pynput if not in a headless environment
-    from pynput import keyboard
+        return None, events
 
     def on_press(key):
         try:
-            if key == keyboard.Key.right:
-                print("Right arrow key pressed. Exiting loop...")
-                events["exit_early"] = True
+            key_char = getattr(key, "char", None)
+            if isinstance(key_char, str):
+                _handle_control_key(key_char, events)
+            elif key == keyboard.Key.right:
+                _handle_control_key("right", events)
             elif key == keyboard.Key.left:
-                print("Left arrow key pressed. Exiting loop and rerecord the last episode...")
-                events["rerecord_episode"] = True
-                events["exit_early"] = True
+                _handle_control_key("left", events)
             elif key == keyboard.Key.esc:
-                print("Escape key pressed. Stopping data recording...")
-                events["stop_recording"] = True
-                events["exit_early"] = True
+                _handle_control_key("esc", events)
         except Exception as e:
             print(f"Error handling key press: {e}")
 
@@ -172,6 +167,107 @@ def init_keyboard_listener():
     listener.start()
 
     return listener, events
+
+
+def _make_control_events() -> dict[str, bool]:
+    return {
+        "start_episode": False,
+        "exit_early": False,
+        "rerecord_episode": False,
+        "stop_recording": False,
+    }
+
+
+def _handle_control_key(key: str, events: dict[str, bool]) -> None:
+    key = key.lower()
+    if key == "s":
+        print("S key pressed. Starting episode...")
+        events["start_episode"] = True
+    elif key == "d" or key == "right":
+        print("D/right key pressed. Ending current loop...")
+        events["exit_early"] = True
+    elif key == "left":
+        print("Left arrow key pressed. Exiting loop and rerecord the last episode...")
+        events["rerecord_episode"] = True
+        events["exit_early"] = True
+    elif key == "esc":
+        print("Escape key pressed. Stopping data recording...")
+        events["stop_recording"] = True
+        events["exit_early"] = True
+
+
+class _TerminalKeyboardListener:
+    """Small stdin fallback for WSL/headless terminals where pynput is unavailable."""
+
+    def __init__(self, events: dict[str, bool]):
+        self.events = events
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._old_termios = None
+
+    def start(self) -> bool:
+        if not sys.stdin.isatty():
+            return False
+
+        try:
+            self._old_termios = termios.tcgetattr(sys.stdin)
+            import tty
+
+            tty.setcbreak(sys.stdin.fileno())
+        except Exception:
+            self._restore_terminal()
+            return False
+
+        self._thread = threading.Thread(target=self._run, name="terminal-keyboard-listener", daemon=True)
+        self._thread.start()
+        return True
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=0.2)
+            self._thread = None
+        self._restore_terminal()
+
+    def _restore_terminal(self) -> None:
+        if self._old_termios is not None:
+            try:
+                termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self._old_termios)
+            except Exception:
+                pass
+            self._old_termios = None
+
+    def _run(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                readable, _, _ = select.select([sys.stdin], [], [], 0.05)
+                if not readable:
+                    continue
+                char = sys.stdin.read(1)
+                if char == "\x1b":
+                    key = self._read_escape_sequence()
+                else:
+                    key = char
+                _handle_control_key(key, self.events)
+            except Exception as exc:
+                logging.debug("Terminal keyboard listener failed: %s", exc)
+                break
+
+    @staticmethod
+    def _read_escape_sequence() -> str:
+        readable, _, _ = select.select([sys.stdin], [], [], 0.02)
+        if not readable:
+            return "esc"
+        second = sys.stdin.read(1)
+        readable, _, _ = select.select([sys.stdin], [], [], 0.02)
+        if not readable:
+            return "esc"
+        third = sys.stdin.read(1)
+        if second == "[" and third == "C":
+            return "right"
+        if second == "[" and third == "D":
+            return "left"
+        return "esc"
 
 
 def sanity_check_dataset_name(repo_id, policy_cfg):

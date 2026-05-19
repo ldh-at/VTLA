@@ -6,18 +6,16 @@
 
 ## 현재 구성
 
-공식 예제 파일은 아래 두 개입니다.
-
-- `HAND_UI.py`: 제조사 GUI 예제입니다. 센서 상태 확인, point count 확인, auto-return 수신, total force/distributed force 파싱을 모두 포함합니다.
-- `Read_Single_Sensor_Hand.py`: 제조사 CLI 예제입니다. serial 명령을 보내고 auto-return frame을 받아 raw data를 확인하는 단일 실행 예제입니다.
-
-LeRobot에 연결하기 위해 쓰는 파일은 아래입니다.
+LeRobot에 연결하기 위해 쓰는 파일만 남겼습니다.
 
 - `paxini_so101.py`: 기존 SO101 follower에 촉각 observation을 추가한 robot class입니다.
 - `config_paxini_so101.py`: serial port, tactile image size, taxel 수, CSV replay 설정을 담는 config입니다.
 - `paxini_reader.py`: 실제 serial 센서, mock 센서, PXSR CSV replay를 읽는 reader입니다.
 - `tactile_render.py`: 154개 taxel 값을 `(64, 64)` heatmap 또는 `(2, 9, 9)` stacked grid로 바꿉니다.
+- `types.py`: Paxini reader가 반환하는 sample dataclass입니다.
 - `make_pi05_smoke_dataset.py`: 실제 로봇/센서 없이 CSV나 mock으로 LeRobot dataset을 만드는 smoke test 스크립트입니다.
+
+제조사 GUI/CLI 예제는 프로토콜 확인에는 유용했지만 record/train 런타임에는 쓰지 않기 때문에 이 패키지에서 제거했습니다.
 
 ## 센서 데이터 구조
 
@@ -43,7 +41,7 @@ heatmap       : 154개 taxel -> (64, 64)
 stacked_9x9   : 154개 taxel -> (2, 9, 9)
 ```
 
-추천은 `stacked_9x9`입니다. 각 sensor의 77개 taxel을 9x9 격자에 넣고 네 모서리만 0으로 채웁니다. 그러면 ring과 pinky가 각각 한 채널이 되어 `observation.tactile.primary`의 shape가 `(2, 9, 9)`가 됩니다. Pi0.5 tactile CNN은 이 값을 `Conv2d(in_channels=2, kernel_size=3)` 형태로 직접 처리할 수 있습니다.
+추천은 `stacked_9x9`입니다. 각 sensor의 77개 taxel을 9x9 격자에 넣고 네 모서리만 0으로 채웁니다. 그러면 ring과 pinky가 각각 한 채널이 되어 `observation.tactile.primary`의 shape가 `(2, 9, 9)`가 됩니다. 기본값은 frame-wise normalize를 하지 않고 센서 값에 `tactile_taxel_scale`만 곱한 값을 저장합니다. Pi0.5 tactile CNN은 이 값을 `Conv2d(in_channels=2, kernel_size=3)` 형태로 직접 처리할 수 있습니다.
 
 LeRobot dataset에 들어가는 주요 feature는 다음과 같습니다.
 
@@ -160,7 +158,7 @@ lerobot-teleoperate \
   --robot.type=paxini_so101_follower \
   --robot.port=/dev/ttyACM_FOLLOWER \
   --robot.id=so101_paxini \
-  --robot.tactile_port=/dev/ttyACM_SENSOR \
+  --robot.tactile_port=/dev/paxini_tactile \
   --robot.tactile_num_taxels=154 \
   --robot.tactile_representation=stacked_9x9 \
   --teleop.type=so101_leader \
@@ -202,6 +200,14 @@ lerobot-teleoperate \
   --fps=30
 ```
 
+실제 serial 센서는 기본적으로 background thread에서 계속 읽습니다.
+record loop는 최신 sample만 가져가므로 촉각 frame 대기 때문에 전체 FPS가 흔들리는 일을 줄입니다.
+문제 추적을 위해 동기식으로 되돌리고 싶을 때만 아래 옵션을 추가합니다.
+
+```bash
+--robot.tactile_async_read=false
+```
+
 ## 데이터 기록: lerobot-record
 
 record는 매 프레임 아래 순서로 실행됩니다.
@@ -222,7 +228,7 @@ lerobot-record \
   --robot.type=paxini_so101_follower \
   --robot.port=/dev/ttyACM_FOLLOWER \
   --robot.id=so101_paxini \
-  --robot.tactile_port=/dev/ttyACM_SENSOR \
+  --robot.tactile_port=/dev/paxini_tactile \
   --robot.tactile_num_taxels=154 \
   --robot.tactile_representation=stacked_9x9 \
   --robot.cameras='{front: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30}}' \
@@ -249,7 +255,7 @@ lerobot-replay \
   --robot.type=paxini_so101_follower \
   --robot.port=/dev/ttyACM_FOLLOWER \
   --robot.id=so101_paxini \
-  --robot.tactile_port=/dev/ttyACM_SENSOR \
+  --robot.tactile_port=/dev/paxini_tactile \
   --robot.tactile_num_taxels=154 \
   --robot.tactile_representation=stacked_9x9 \
   --dataset.repo_id=dlehg/so101_paxini_ring_pinky_YYYYMMDD_HHMMSS \
@@ -328,7 +334,7 @@ lerobot-rollout \
   --robot.type=paxini_so101_follower \
   --robot.port=/dev/ttyACM_FOLLOWER \
   --robot.id=so101_paxini \
-  --robot.tactile_port=/dev/ttyACM_SENSOR \
+  --robot.tactile_port=/dev/paxini_tactile \
   --robot.tactile_num_taxels=154 \
   --robot.tactile_representation=stacked_9x9 \
   --task="pick up the object using ring and pinky tactile feedback" \

@@ -28,7 +28,7 @@ def taxels_to_stacked_9x9(
     *,
     sensors: int = 2,
     taxels_per_sensor: int = 77,
-    normalize: bool = True,
+    normalize: bool = False,
 ) -> np.ndarray:
     """Convert 77-taxel M3025-like sensor arrays into a stacked 9x9 grid.
 

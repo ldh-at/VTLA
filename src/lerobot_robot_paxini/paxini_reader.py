@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import re
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -257,6 +258,7 @@ class SerialPaxiniReader(PaxiniReader):
         taxel_value_mode: TaxelValueMode = "z",
         taxel_scale: float = 0.1,
         skip_bytes: int = 0,
+        async_read: bool = True,
     ):
         if num_taxels <= 0:
             raise ValueError(f"num_taxels must be positive, got {num_taxels}.")
@@ -275,9 +277,14 @@ class SerialPaxiniReader(PaxiniReader):
         self.taxel_value_mode = taxel_value_mode
         self.taxel_scale = float(taxel_scale)
         self.skip_bytes = skip_bytes
+        self.async_read = async_read
         self.connected = False
         self._serial = None
         self._last_sample: PaxiniSample | None = None
+        self._last_error: Exception | None = None
+        self._sample_lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._read_thread: threading.Thread | None = None
 
     def connect(self) -> None:
         require_package("pyserial", extra="pyserial-dep", import_name="serial")
@@ -295,12 +302,18 @@ class SerialPaxiniReader(PaxiniReader):
         )
         self._serial.reset_input_buffer()
         self._serial.reset_output_buffer()
+        with self._sample_lock:
+            self._last_sample = None
+            self._last_error = None
         self._set_auto_return(False)
         self._serial.reset_input_buffer()
         self._set_auto_return(True)
         self.connected = True
+        if self.async_read:
+            self._start_background_reader()
 
     def disconnect(self) -> None:
+        self._stop_background_reader()
         if self._serial is not None and self._serial.is_open:
             try:
                 self._set_auto_return(False)
@@ -314,17 +327,72 @@ class SerialPaxiniReader(PaxiniReader):
         if not self.connected:
             raise RuntimeError("SerialPaxiniReader is not connected.")
 
+        if self.async_read:
+            return self._read_latest_from_background()
+
+        return self._read_and_decode_once()
+
+    def _read_and_decode_once(self) -> PaxiniSample:
         try:
             frame = self._read_auto_return_frame()
         except TimeoutError:
-            if self._last_sample is not None:
-                return self._last_sample
+            with self._sample_lock:
+                if self._last_sample is not None:
+                    return self._last_sample
             raise
 
         data = self._parse_auto_return_frame(frame)
         sample = self._decode_taxels(data)
-        self._last_sample = sample
+        with self._sample_lock:
+            self._last_sample = sample
+            self._last_error = None
         return sample
+
+    def _read_latest_from_background(self) -> PaxiniSample:
+        deadline = time.monotonic() + self.timeout_s
+        while True:
+            with self._sample_lock:
+                if self._last_sample is not None:
+                    return self._last_sample
+                last_error = self._last_error
+
+            if time.monotonic() >= deadline:
+                if last_error is not None:
+                    raise RuntimeError(f"PXSR background reader has no sample yet: {last_error}") from last_error
+                raise TimeoutError(f"Timed out waiting for first PXSR sample on {self.port}.")
+            time.sleep(0.002)
+
+    def _start_background_reader(self) -> None:
+        self._stop_event.clear()
+        self._read_thread = threading.Thread(
+            target=self._background_read_loop,
+            name=f"paxini-reader-{self.port}",
+            daemon=True,
+        )
+        self._read_thread.start()
+
+    def _stop_background_reader(self) -> None:
+        self._stop_event.set()
+        if self._read_thread is not None:
+            self._read_thread.join(timeout=self.timeout_s + 0.2)
+            self._read_thread = None
+
+    def _background_read_loop(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                frame = self._read_auto_return_frame()
+                data = self._parse_auto_return_frame(frame)
+                sample = self._decode_taxels(data)
+                with self._sample_lock:
+                    self._last_sample = sample
+                    self._last_error = None
+            except TimeoutError:
+                continue
+            except Exception as exc:
+                with self._sample_lock:
+                    self._last_error = exc
+                if not self._stop_event.wait(0.01):
+                    continue
 
     def _set_auto_return(self, enabled: bool) -> None:
         if self._serial is None or not self._serial.is_open:

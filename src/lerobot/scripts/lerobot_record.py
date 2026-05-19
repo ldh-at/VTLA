@@ -77,7 +77,6 @@ from lerobot.cameras.realsense import RealSenseCameraConfig  # noqa: F401
 from lerobot.cameras.zmq import ZMQCameraConfig  # noqa: F401
 from lerobot.common.control_utils import (
     init_keyboard_listener,
-    is_headless,
     sanity_check_dataset_robot_compatibility,
 )
 from lerobot.configs import parser
@@ -189,6 +188,16 @@ class RecordConfig:
                                V
                   ( Rerun Log / Loop Wait )
 """
+
+
+def wait_for_episode_start(events: dict, play_sounds: bool) -> bool:
+    """Block between episodes until the operator explicitly starts recording."""
+    events["start_episode"] = False
+    log_say("Press S to start recording the next episode", play_sounds)
+    while not events["start_episode"] and not events["stop_recording"]:
+        time.sleep(0.05)
+    events["start_episode"] = False
+    return not events["stop_recording"]
 
 
 @safe_stop_image_writer
@@ -426,6 +435,8 @@ def record(
         with VideoEncodingManager(dataset):
             recorded_episodes = 0
             while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
+                if listener is not None and not wait_for_episode_start(events, cfg.play_sounds):
+                    break
                 log_say(f"Recording episode {dataset.num_episodes}", cfg.play_sounds)
                 record_loop(
                     robot=robot,
@@ -482,7 +493,7 @@ def record(
         if teleop and teleop.is_connected:
             teleop.disconnect()
 
-        if not is_headless() and listener:
+        if listener:
             listener.stop()
 
         if cfg.dataset.push_to_hub:

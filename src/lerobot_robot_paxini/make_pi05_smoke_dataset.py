@@ -76,7 +76,7 @@ def main() -> None:
     parser.add_argument("--num-taxels", type=int, default=154)
     parser.add_argument("--tactile-image-size", type=int, default=64)
     parser.add_argument("--tactile-representation", choices=["heatmap", "stacked_9x9"], default="heatmap")
-    parser.add_argument("--no-tactile-grid-normalize", action="store_true")
+    parser.add_argument("--tactile-grid-normalize", action="store_true")
     parser.add_argument("--camera-image-size", type=int, default=224)
     parser.add_argument("--csv-scale", type=float, default=1.0)
     args = parser.parse_args()
@@ -118,7 +118,7 @@ def main() -> None:
             if args.tactile_representation == "stacked_9x9":
                 tactile = taxels_to_stacked_9x9(
                     sample.taxels,
-                    normalize=not args.no_tactile_grid_normalize,
+                    normalize=args.tactile_grid_normalize,
                 )
             else:
                 tactile = tactile_renderer.render(sample.taxels)
